@@ -69,6 +69,14 @@ RUN_FOR_SEC: Optional[int] = None  # set e.g. 15*60 to auto-stop after 15 minute
 SEEN_CACHE_MAX = 50000        # dedup cache limit (avoid infinite growth)
 
 # =========================
+# Comments behavior (NEW)
+# =========================
+FETCH_ALL_COMMENTS = True     # True = expand all "MoreComments" and fetch all comments
+COMMENTS_MAX_ATTEMPTS = 6     # retry attempts when fetching comments
+COMMENTS_BASE_DELAY_SEC = 1.0 # base delay between comment API operations
+COMMENTS_DELAY_CAP_SEC = 60.0 # cap delay
+
+# =========================
 # Export files
 # =========================
 OUT_DIR = "data"
@@ -76,8 +84,8 @@ OUT_JSONL = os.path.join(OUT_DIR, "reddit_posts.jsonl")  # append mode
 OUT_CSV = os.path.join(OUT_DIR, "reddit_posts.csv")      # append mode
 WRITE_HEADER_IF_EMPTY = True
 
-# Schema fields (as required in your plan)
-SCHEMA_FIELDS = ["post_id", "subreddit", "title", "body", "author", "created_utc", "score"]
+# Schema fields (as required in your plan) + comments (NEW)
+SCHEMA_FIELDS = ["post_id", "subreddit", "title", "body", "author", "created_utc", "score", "comments"]
 
 
 # -------------------------
@@ -124,13 +132,84 @@ def create_kafka_producer() -> KafkaProducer:
     return producer
 
 
+# -------------------------
+# Comments fetch (NEW)
+# -------------------------
+def fetch_all_comments_text(submission: praw.models.Submission) -> List[str]:
+    """
+    Fetch *all* comments for a submission.
+    - Expands MoreComments (replace_more(limit=None))
+    - Retries on transient errors + rate limit (429)
+    - Returns list of comment bodies (strings)
+    """
+    attempt = 0
+    comments: List[str] = []
+
+    # Optional: choose ordering to reduce churn
+    # 'top' often returns stable high-quality comments; 'new' returns most recent
+    submission.comment_sort = "top"
+
+    while True:
+        attempt += 1
+        try:
+            if FETCH_ALL_COMMENTS:
+                # This can be heavy but is the correct way to get "all comments"
+                submission.comments.replace_more(limit=None)
+
+            # Throttle a bit after expansion to avoid burst
+            sleep_with_jitter(COMMENTS_BASE_DELAY_SEC, cap=COMMENTS_DELAY_CAP_SEC)
+
+            # Flatten full comment tree
+            for c in submission.comments.list():
+                body = getattr(c, "body", None)
+                if isinstance(body, str) and body.strip():
+                    comments.append(body.strip())
+
+            return comments
+
+        except TooManyRequests as e:
+            retry_after = getattr(e, "retry_after", None)
+            if retry_after is not None:
+                wait = float(retry_after) + random.uniform(0, 0.5)
+                logging.warning(f"429 TooManyRequests while fetching comments, retry_after={retry_after}s")
+                time.sleep(wait)
+            else:
+                backoff = 2 ** min(attempt, 5)
+                logging.warning(f"429 TooManyRequests while fetching comments, backoff={backoff}s")
+                sleep_with_jitter(backoff, cap=COMMENTS_DELAY_CAP_SEC)
+
+        except (RequestException, ResponseException, ServerError) as e:
+            if attempt >= COMMENTS_MAX_ATTEMPTS:
+                logging.error(f"Transient error fetching comments after {attempt} attempts: {e}")
+                return []
+            backoff = 2 ** min(attempt, 5)
+            logging.warning(f"Transient error fetching comments: {e} | retry in ~{backoff}s")
+            sleep_with_jitter(backoff, cap=COMMENTS_DELAY_CAP_SEC)
+
+        except PrawcoreException as e:
+            if attempt >= COMMENTS_MAX_ATTEMPTS:
+                logging.error(f"PRAW error fetching comments after {attempt} attempts: {e}")
+                return []
+            backoff = 2 ** min(attempt, 5)
+            logging.warning(f"PRAW error fetching comments: {e} | retry in ~{backoff}s")
+            sleep_with_jitter(backoff, cap=COMMENTS_DELAY_CAP_SEC)
+
+        except Exception as e:
+            # Non-PRAW unexpected issues
+            logging.error(f"Unexpected error fetching comments: {e}")
+            return []
+
+
 def process_submission(submission: praw.models.Submission) -> Dict[str, Any]:
     """
-    Required schema:
-      post_id, subreddit, title, body, author, created_utc, score
+    Required schema (+ comments):
+      post_id, subreddit, title, body, author, created_utc, score, comments
     """
     body = submission.selftext if getattr(submission, "is_self", False) else ""
     author = submission.author.name if submission.author else None
+
+    # NEW: fetch all comments (can be heavy)
+    comments = fetch_all_comments_text(submission)
 
     return {
         "post_id": submission.id,
@@ -140,6 +219,7 @@ def process_submission(submission: praw.models.Submission) -> Dict[str, Any]:
         "author": author,
         "created_utc": int(submission.created_utc),
         "score": int(getattr(submission, "score", 0) or 0),
+        "comments": comments,
     }
 
 
@@ -226,14 +306,20 @@ def csv_needs_header(path: str) -> bool:
 
 
 def append_csv(path: str, row: Dict[str, Any]) -> None:
+    """
+    CSV cannot store list directly -> store `comments` as JSON string.
+    """
     ensure_out_dir()
     needs_header = csv_needs_header(path)
+
+    row_for_csv = {k: row.get(k) for k in SCHEMA_FIELDS}
+    row_for_csv["comments"] = json.dumps(row.get("comments", []), ensure_ascii=False)
+
     with open(path, "a", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=SCHEMA_FIELDS)
         if needs_header:
             w.writeheader()
-        # keep only schema fields in csv
-        w.writerow({k: row.get(k) for k in SCHEMA_FIELDS})
+        w.writerow(row_for_csv)
 
 
 # -------------------------
