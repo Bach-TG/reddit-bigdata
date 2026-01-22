@@ -1,0 +1,56 @@
+# version: '3.8'
+
+services:
+  spark-master:
+    image: phongtd11-spark-image
+    entrypoint: ['./entrypoint.sh', 'master']
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8080" ]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    volumes:
+      - ./spark_scripts:/opt/spark_scripts
+      - ./reddit_posts.jsonl:/mnt/user-data/uploads/reddit_posts.jsonl
+      - spark_data:/tmp
+      - spark-logs:/opt/spark/spark-events
+    env_file:
+      - .env.spark
+    ports:
+      - '9090:8080'
+      - '7077:7077'
+
+
+  spark-history-server:
+    image: phongtd11-spark-image
+    entrypoint: ['./entrypoint.sh', 'history']
+    depends_on:
+      - spark-master
+    env_file:
+      - .env.spark
+    volumes:
+      - ./spark_scripts:/opt/spark_scripts
+      - ./reddit_posts.jsonl:/mnt/user-data/uploads/reddit_posts.jsonl
+      - spark_data:/tmp
+      - spark-logs:/opt/spark/spark-events
+    ports:
+      - '18080:18080'
+
+  spark-worker:
+#    container_name: da-spark-worker
+    image: phongtd11-spark-image
+    entrypoint: ['./entrypoint.sh', 'worker']
+    depends_on:
+      - spark-master
+    env_file:
+      - .env.spark
+    volumes:
+      - ./spark_scripts:/opt/spark_scripts
+      - ./reddit_posts.jsonl:/mnt/user-data/uploads/reddit_posts.jsonl
+      - spark_data:/tmp
+      - spark-logs:/opt/spark/spark-events
+
+volumes:
+  spark_data:
+    driver: local
+  spark-logs:
