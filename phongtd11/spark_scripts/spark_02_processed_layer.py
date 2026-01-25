@@ -14,7 +14,7 @@ from pyspark.sql.types import (
 )
 import re
 from pyspark.sql import functions as F
-from db_connection_config import DB_CONFIG
+from config import DB_CONFIG
 
 # 11. **spark_02_processed_layer.py** ⚡
 #     - PySpark: NLP with UDFs

@@ -13,7 +13,7 @@ from pyspark.sql.functions import (
 from pyspark.sql.window import Window
 from datetime import datetime
 import json
-from db_connection_config import DB_CONFIG
+from config import DB_CONFIG
 
 # 12. **spark_03_analytics_layer.py** ⚡
 #     - PySpark: Spark SQL Analytics

@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 import json
 from pyspark.sql import functions as F
-from db_connection_config import DB_CONFIG
+from config import DB_CONFIG, KAFKA_CONFIG
 
 # 10. **spark_01_raw_layer.py** ⚡
 #     - PySpark: Raw Data Ingestion
@@ -25,8 +25,8 @@ from db_connection_config import DB_CONFIG
 
 
 class RawLayerProcessorSpark:
-    def __init__(self, input_file, output_dir="data_spark/raw"):
-        self.input_file = input_file
+    def __init__(self, kafka_topic, output_dir="data_spark/raw"):
+        self.kafka_topic = kafka_topic
         self.output_dir = output_dir
         self.batch_id = self._generate_batch_id()
         
@@ -60,17 +60,48 @@ class RawLayerProcessorSpark:
             StructField("score", IntegerType(), False)
         ])
     
-    def load_jsonl(self):
-        """Load JSONL file using Spark"""
+    # def load_jsonl(self):
+    #     """Load JSONL file using Spark"""
+    #     schema = self.define_schema()
+        
+    #     # Read JSONL
+    #     df = self.spark.read \
+    #         .option("multiline", "false") \
+    #         .schema(schema) \
+    #         .json(self.input_file)
+        
+    #     print(f"📥 Loaded {df.count()} records from JSONL")
+    #     return df
+
+    def load_kafka(self):
+        """Load data from Kafka topic using Spark"""
         schema = self.define_schema()
         
-        # Read JSONL
-        df = self.spark.read \
-            .option("multiline", "false") \
-            .schema(schema) \
-            .json(self.input_file)
+        # Read from Kafka
+        df_raw = self.spark.read \
+            .format("kafka") \
+            .option("kafka.bootstrap.servers", KAFKA_CONFIG['bootstrap_servers']) \
+            .option("kafka.security.protocol", KAFKA_CONFIG['security_protocol']) \
+            .option("kafka.sasl.mechanism", KAFKA_CONFIG['sasl_mechanism']) \
+            .option("kafka.sasl.username", KAFKA_CONFIG['username']) \
+            .option("kafka.sasl.password", KAFKA_CONFIG['password']) \
+            .option("subscribe", KAFKA_CONFIG['topic']) \
+            .option("startingOffsets", "latest") \
+            .load()
         
-        print(f"📥 Loaded {df.count()} records from JSONL")
+        # Convert Kafka value from binary to string
+        df = df_raw.select(
+            col("key").cast("string"),
+            col("value").cast("string")
+        )
+        
+        # Parse JSON string into structured data
+        df = df.withColumn("json_data", F.from_json(col("value"), schema))
+        
+        # Select only the structured fields
+        df = df.select(col("json_data.*"))
+        
+        print(f"📥 Loaded {df.count()} records from Kafka")
         return df
     
     def add_metadata(self, df):
@@ -166,9 +197,11 @@ class RawLayerProcessorSpark:
         print(f"🚀 Starting Raw Layer Processing (PySpark) - Batch: {self.batch_id}")
         print("="*70)
         
-        # Step 1: Load data
-        print("\n📥 Step 1: Loading JSONL data with Spark...")
-        df = self.load_jsonl()
+        # # Step 1: Load data
+        # print("\n📥 Step 1: Loading JSONL data with Spark...")
+        # df = self.load_jsonl()
+        print("\n📥 Step 1: Loading data from Kafka with Spark...")
+        df = self.load_kafka()
         
         # Step 2: Add metadata
         print("\n🏷️  Step 2: Adding metadata...")

@@ -122,26 +122,6 @@ class SparkPipeline:
             print(f"   ✓ Processed Layer (Silver) - NLP Enriched")
             print(f"   ✓ Analytics Layer (Gold) - 7 Analytical Tables")
             
-            print(f"\n📁 PySpark Output Structure:")
-            print(f"   data_spark/")
-            print(f"   ├── raw/                         # Partitioned by subreddit/year/month/day")
-            print(f"   ├── processed/                   # Partitioned by subreddit")
-            print(f"   └── analytics/                   # 7 analytical tables")
-            print(f"       ├── daily_subreddit_stats/")
-            print(f"       ├── trending_topics/")
-            print(f"       ├── user_engagement/")
-            print(f"       ├── cross_subreddit_comparison/")
-            print(f"       ├── hourly_patterns/")
-            print(f"       ├── entity_network/")
-            print(f"       ├── sentiment_timeseries/")
-            print(f"       └── insights.json")
-            
-            print(f"\n🚀 Scalability:")
-            print(f"   • Current: {results['processed_count']} posts in {duration:.1f}s")
-            print(f"   • Spark can scale to: Millions of posts")
-            print(f"   • Distributed: Across multiple nodes/cores")
-            print(f"   • Production: Deploy on EMR, Databricks, Dataproc")
-            
             print(f"\n💡 Key Insights Generated:")
             for i, insight in enumerate(insights['key_insights'], 1):
                 print(f"   {i}. {insight['title']}")

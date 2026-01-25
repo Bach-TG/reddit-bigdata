@@ -8,7 +8,7 @@ x-airflow-common:
   # In order to add custom dependencies or upgrade provider packages you can use your extended image.
   # Comment the image line, place your Dockerfile in the directory where you placed the docker-compose.yaml
   # and uncomment the "build" line below, Then run `docker-compose build` to build the images.
-  image: ${AIRFLOW_IMAGE_NAME:-airflow_dp:latest}
+  image: ${AIRFLOW_IMAGE_NAME:-airflow_dp:test}
   environment:
     &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: CeleryExecutor
@@ -27,16 +27,30 @@ x-airflow-common:
     # See https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/logging-monitoring/check-health.html#scheduler-health-check-server
     # yamllint enable rule:line-length
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'false'
+    AIRFLOW__LOGGING__BASE_LOG_FOLDER: '/opt/airflow/logs'
+    AIRFLOW__LOGGING__REMOTE_LOGGING: 'False'
 
     POSTGRES_DB: reddit_db
     POSTGRES_HOST: postgres
     POSTGRES_USER: reddit_user
     POSTGRES_PASSWORD: reddit_pass
 
+    # Kafka
+    KAFKA_BOOTSTRAP_SERVER: "kafka:9092"  # Your Kafka bootstrap servers
+    KAFKA_SECURITY_PROTOCOL: "PLAINTEXT"  # Security protocol, can be PLAINTEXT, SSL, SASL_PLAINTEXT, etc.
+    KAFKA_SASL_MECHANISM: "PLAIN"  # SASL mechanism for authentication (only needed if SASL is enabled)
+    KAFKA_PLAIN_USERNAME: "kafka_local"  # Username for SASL PLAIN authentication (if using SASL)
+    KAFKA_PLAIN_PASSWORD: "kafka_local_password"  # Password for SASL PLAIN authentication (if using SASL)
+    KAFKA_PRODUCER_RETRIES: 5  # Number of retries for producers if a message fails to send
+    KAFKA_TOPIC: "reddit-posts"  # Kafka topic to produce/consume messages
+    KAFKA_RETRIES: 5  # Number of retries for consumers if fetching messages fails
+    
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
-    - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
-    - ${AIRFLOW_PROJ_DIR:-.}/airflow_src:/opt/airflow/workspace/src
+    - ./reddit_posts.jsonl:/mnt/user-data/uploads/reddit_posts.jsonl
+    - ./spark_scripts:/opt/spark_scripts
+    # - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
+    # - ${AIRFLOW_PROJ_DIR:-.}/airflow_src:/opt/airflow/workspace/src
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on
@@ -64,7 +78,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./init_postgres.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "reddit_pass"]
+      test: ["CMD", "pg_isready", "-U", "reddit_user", "-d", "reddit_db"]
       interval: 30s
       timeout: 10s
       retries: 5
