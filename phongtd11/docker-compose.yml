@@ -49,6 +49,7 @@ x-airflow-common:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
     - ./reddit_posts.jsonl:/mnt/user-data/uploads/reddit_posts.jsonl
     - ./spark_scripts:/opt/spark_scripts
+    - ./spark-jars:/opt/spark-jars
     # - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
     # - ${AIRFLOW_PROJ_DIR:-.}/airflow_src:/opt/airflow/workspace/src
   user: "${AIRFLOW_UID:-50000}:0"
@@ -57,6 +58,8 @@ x-airflow-common:
     redis:
       condition: service_healthy
     postgres-airflow:
+      condition: service_healthy
+    spark-worker:
       condition: service_healthy
   
 services:
@@ -360,6 +363,7 @@ services:
     volumes:
       - ./spark_scripts:/opt/spark_scripts
       - ./reddit_posts.jsonl:/mnt/user-data/uploads/reddit_posts.jsonl
+      - ./spark-jars:/opt/spark-jars
       - spark_data:/tmp
       - spark-logs:/opt/spark/spark-events
     env_file:
@@ -378,6 +382,7 @@ services:
     volumes:
       - ./spark_scripts:/opt/spark_scripts
       - ./reddit_posts.jsonl:/mnt/user-data/uploads/reddit_posts.jsonl
+      - ./spark-jars:/opt/spark-jars
       - spark_data:/tmp
       - spark-logs:/opt/spark/spark-events
     ports:
@@ -393,8 +398,15 @@ services:
     volumes:
       - ./spark_scripts:/opt/spark_scripts
       - ./reddit_posts.jsonl:/mnt/user-data/uploads/reddit_posts.jsonl
+      - ./spark-jars:/opt/spark-jars
       - spark_data:/tmp
       - spark-logs:/opt/spark/spark-events
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081"] 
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
   # ==========================================================================
   # GRAFANA - Monitoring Dashboard
   # ==========================================================================

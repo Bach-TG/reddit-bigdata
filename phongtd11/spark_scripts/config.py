@@ -13,5 +13,5 @@ KAFKA_CONFIG = {
     'sasl_mechanism': 'PLAIN',
     'username': 'kafka_local',
     'password': 'kafka_local_password',
-    'topic': 'reddit_posts'
+    'topic': 'reddit-posts'
 }

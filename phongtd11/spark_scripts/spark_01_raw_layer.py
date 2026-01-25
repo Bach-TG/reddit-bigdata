@@ -77,22 +77,37 @@ class RawLayerProcessorSpark:
         """Load data from Kafka topic using Spark"""
         schema = self.define_schema()
         
+        # Build JAAS config string for SASL (required even for PLAINTEXT + PLAIN)
+        jaas_config = (
+            'org.apache.kafka.common.security.plain.PlainLoginModule required '
+            f'username="{KAFKA_CONFIG["username"]}" '
+            f'password="{KAFKA_CONFIG["password"]}";'
+        )
         # Read from Kafka
+        # df_raw = self.spark.read \
+        #     .format("kafka") \
+        #     .option("kafka.bootstrap.servers", KAFKA_CONFIG['bootstrap_servers']) \
+        #     .option("kafka.security.protocol", KAFKA_CONFIG['security_protocol']) \
+        #     .option("kafka.sasl.mechanism", KAFKA_CONFIG['sasl_mechanism']) \
+        #     .option("kafka.sasl.username", KAFKA_CONFIG['username']) \
+        #     .option("kafka.sasl.password", KAFKA_CONFIG['password']) \
+        #     .option("subscribe", KAFKA_CONFIG['topic']) \
+        #     .option("startingOffsets", "latest") \
+        #     .load()
+
+        # BATCH READ
         df_raw = self.spark.read \
             .format("kafka") \
-            .option("kafka.bootstrap.servers", KAFKA_CONFIG['bootstrap_servers']) \
-            .option("kafka.security.protocol", KAFKA_CONFIG['security_protocol']) \
-            .option("kafka.sasl.mechanism", KAFKA_CONFIG['sasl_mechanism']) \
-            .option("kafka.sasl.username", KAFKA_CONFIG['username']) \
-            .option("kafka.sasl.password", KAFKA_CONFIG['password']) \
-            .option("subscribe", KAFKA_CONFIG['topic']) \
-            .option("startingOffsets", "latest") \
+            .option("kafka.bootstrap.servers", KAFKA_CONFIG["bootstrap_servers"]) \
+            .option("subscribe", self.kafka_topic) \
+            .option("startingOffsets", "earliest") \
+            .option("endingOffsets", "latest") \
             .load()
         
         # Convert Kafka value from binary to string
         df = df_raw.select(
-            col("key").cast("string"),
-            col("value").cast("string")
+            col("key").cast("string").alias("key"),
+            col("value").cast("string").alias("value")
         )
         
         # Parse JSON string into structured data
@@ -169,7 +184,7 @@ class RawLayerProcessorSpark:
         manifest = {
             'batch_id': self.batch_id,
             'ingestion_time': datetime.now().isoformat(),
-            'source_file': str(self.input_file),
+            'source_kafka_topic': str(self.kafka_topic),
             'total_records': total_records,
             'subreddits': {row['subreddit']: row['count'] for row in subreddit_counts},
             'date_range': {
@@ -290,7 +305,7 @@ class RawLayerProcessorSpark:
 if __name__ == "__main__":
     # Initialize processor
     processor = RawLayerProcessorSpark(
-        input_file="/mnt/user-data/uploads/reddit_posts.jsonl",
+        kafka_topic="reddit_posts",
         output_dir="data_spark/raw"
     )
 

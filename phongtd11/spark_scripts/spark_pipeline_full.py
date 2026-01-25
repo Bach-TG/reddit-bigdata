@@ -16,11 +16,11 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from spark_01_raw_layer import RawLayerProcessorSpark
 from spark_02_processed_layer import ProcessedLayerProcessorSpark
 from spark_03_analytics_layer import AnalyticsLayerProcessorSpark
+from config import KAFKA_CONFIG
 
-
-def run_full_pipeline(kafka_topic, raw_output_dir="data_spark/raw", 
-                     processed_output_dir="data_spark/processed", 
-                     analytics_output_dir="data_spark/analytics"):
+def run_full_pipeline(kafka_topic, raw_output_dir="./data_spark/raw", 
+                     processed_output_dir="./data_spark/processed", 
+                     analytics_output_dir="./data_spark/analytics"):
     """
     Execute the complete Spark ETL pipeline:
     1. Raw Layer: Ingest and store raw data
@@ -152,32 +152,13 @@ def run_full_pipeline(kafka_topic, raw_output_dir="data_spark/raw",
 
 
 def main():
-    """Main entry point for the pipeline"""
-    
-    # # Default input file - this should be adjusted based on your actual data
-    # default_input_file = "/mnt/user-data/uploads/reddit_posts.jsonl"
-    
-    # # Check if input file exists, otherwise prompt user
-    # if len(sys.argv) > 1:
-    #     input_file = sys.argv[1]
-    # else:
-    #     print(f"⚠️  No input file specified as argument.")
-    #     print(f"ℹ️   Using default: {default_input_file}")
-    #     print("💡 To specify input file: python spark_pipeline_full.py /path/to/input.jsonl")
-    #     input_file = default_input_file
-    
-    # # Validate input file exists
-    # if not Path(input_file).exists():
-    #     print(f"❌ Input file does not exist: {input_file}")
-    #     print("💡 Please provide a valid input JSONL file path")
-    #     sys.exit(1)
     
     # Create output directories if they don't exist
-    Path("data_spark/raw").mkdir(parents=True, exist_ok=True)
-    Path("data_spark/processed").mkdir(parents=True, exist_ok=True)
-    Path("data_spark/analytics").mkdir(parents=True, exist_ok=True)
-    
-    kafka_topic = "reddit_posts"
+    Path("./data_spark/raw").mkdir(parents=True, exist_ok=True)
+    Path("./data_spark/processed").mkdir(parents=True, exist_ok=True)
+    Path("./data_spark/analytics").mkdir(parents=True, exist_ok=True)
+
+    kafka_topic = KAFKA_CONFIG["topic"]
     # Run the full pipeline
     try:
         results = run_full_pipeline(kafka_topic=kafka_topic)

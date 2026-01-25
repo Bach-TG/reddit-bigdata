@@ -201,11 +201,25 @@ with DAG(
     # ========================================================================
     # Task 4: Spark Streaming Job
     # ========================================================================
+    # spark_submit = SparkSubmitOperator(
+    #     task_id="run_spark_job",
+    #     application="/opt/spark_scripts/spark_pipeline_full.py",
+    #     conn_id="spark_standalone",
+    #     verbose=True,
+    # )
     spark_submit = SparkSubmitOperator(
         task_id="run_spark_job",
         application="/opt/spark_scripts/spark_pipeline_full.py",
         conn_id="spark_standalone",
-        verbose=True,
+        name='arrow-spark',
+        deploy_mode='client',
+        # XÓA dòng packages, thay bằng jars
+        jars='/opt/spark-jars/kafka/spark-sql-kafka-0-10_2.12-3.5.1.jar,'
+         '/opt/spark-jars/kafka/spark-token-provider-kafka-0-10_2.12-3.5.1.jar,'
+         '/opt/spark-jars/kafka/kafka-clients-3.4.1.jar,'
+         '/opt/spark-jars/kafka/commons-pool2-2.11.1.jar',
+        packages='org.postgresql:postgresql:42.7.1',  # ← THÊM PACKAGES
+        verbose=True
     )
     
     # ========================================================================
