@@ -1,0 +1,435 @@
+# ============================================================================
+# Reddit Streaming Pipeline - Complete Stack
+# Architecture: Airflow → Kafka → Spark → PostgreSQL
+# ============================================================================
+
+x-airflow-common:
+  &airflow-common
+  # In order to add custom dependencies or upgrade provider packages you can use your extended image.
+  # Comment the image line, place your Dockerfile in the directory where you placed the docker-compose.yaml
+  # and uncomment the "build" line below, Then run `docker-compose build` to build the images.
+  image: ${AIRFLOW_IMAGE_NAME:-airflow_dp:test}
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres-airflow/airflow
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres-airflow/airflow
+    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+
+    AIRFLOW__WEBSERVER__SECRET_KEY: "WJkYzJ9fY6r4yZ3G7J2bR4Q6pXz8P9dN5K1A0E"
+
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    # yamllint disable rule:line-length
+    # Use simple http server on scheduler for health checks
+    # See https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/logging-monitoring/check-health.html#scheduler-health-check-server
+    # yamllint enable rule:line-length
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'false'
+    AIRFLOW__LOGGING__BASE_LOG_FOLDER: '/opt/airflow/logs'
+    AIRFLOW__LOGGING__REMOTE_LOGGING: 'False'
+
+    POSTGRES_DB: reddit_db
+    POSTGRES_HOST: postgres
+    POSTGRES_USER: reddit_user
+    POSTGRES_PASSWORD: reddit_pass
+
+    # Kafka
+    KAFKA_BOOTSTRAP_SERVER: "kafka:9092"  # Your Kafka bootstrap servers
+    KAFKA_SECURITY_PROTOCOL: "PLAINTEXT"  # Security protocol, can be PLAINTEXT, SSL, SASL_PLAINTEXT, etc.
+    KAFKA_SASL_MECHANISM: "PLAIN"  # SASL mechanism for authentication (only needed if SASL is enabled)
+    KAFKA_PLAIN_USERNAME: "kafka_local"  # Username for SASL PLAIN authentication (if using SASL)
+    KAFKA_PLAIN_PASSWORD: "kafka_local_password"  # Password for SASL PLAIN authentication (if using SASL)
+    KAFKA_PRODUCER_RETRIES: 5  # Number of retries for producers if a message fails to send
+    KAFKA_TOPIC: "reddit-posts"  # Kafka topic to produce/consume messages
+    KAFKA_RETRIES: 5  # Number of retries for consumers if fetching messages fails
+    
+  volumes:
+    - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+    - ./reddit_posts.jsonl:/mnt/user-data/uploads/reddit_posts.jsonl
+    - ./spark_scripts:/opt/spark_scripts
+    - ./spark-jars:/opt/spark-jars
+    # - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
+    # - ${AIRFLOW_PROJ_DIR:-.}/airflow_src:/opt/airflow/workspace/src
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    &airflow-common-depends-on
+    redis:
+      condition: service_healthy
+    postgres-airflow:
+      condition: service_healthy
+    spark-worker:
+      condition: service_healthy
+  
+services:
+
+  # Main application PostgreSQL database
+  postgres:
+    image: postgres:15
+    labels:
+      owner: phong
+    container_name: reddit-postgres
+    hostname: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: reddit_db
+      POSTGRES_USER: reddit_user
+      POSTGRES_PASSWORD: reddit_pass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init_postgres.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "reddit_user", "-d", "reddit_db"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+  
+  # Airflow PostgreSQL database (separate instance to avoid conflicts)
+  postgres-airflow:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  # Redis for Airflow
+  redis:
+    # Redis is limited to 7.2-bookworm due to licencing change
+    # https://redis.io/blog/redis-adopts-dual-source-available-licensing/
+    image: redis:7.2-bookworm
+    expose:
+      - 6379
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 30s
+      retries: 50
+      start_period: 30s
+    restart: always
+
+  # Airflow services
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8090:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    environment:
+      <<: *airflow-common-env
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-worker:
+    <<: *airflow-common
+    command: celery worker
+    healthcheck:
+      # yamllint disable rule:line-length
+      test:
+        - "CMD-SHELL"
+        - 'celery --app airflow.providers.celery.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}" || celery --app airflow.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"'
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    environment:
+      <<: *airflow-common-env
+      # Required to handle warm shutdown of the celery workers properly
+      # See https://airflow.apache.org/docs/docker-stack/entrypoint.html#signal-propagation
+      DUMB_INIT_SETSID: "0"
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    # yamllint disable rule:line-length
+    command:
+      - -c
+      - |
+        if [[ -z "${AIRFLOW_UID}" ]]; then
+          echo
+          echo -e "\033[1;33mWARNING!!!: AIRFLOW_UID not set!\e[0m"
+          echo "If you are on Linux, you SHOULD follow the instructions below to set "
+          echo "AIRFLOW_UID environment variable, otherwise files will be owned by root."
+          echo "For other operating systems you can get rid of the warning with manually created .env file:"
+          echo "    See: https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/index.html#setting-the-right-airflow-user"
+          echo
+        fi
+        one_meg=1048576
+        mem_available=$$(($$(getconf _PHYS_PAGES) * $$(getconf PAGE_SIZE) / one_meg))
+        cpus_available=$$(grep -cE 'cpu[0-9]+' /proc/stat)
+        disk_available=$$(df / | tail -1 | awk '{print $$4}')
+        warning_resources="false"
+        if (( mem_available < 4000 )) ; then
+          echo
+          echo -e "\033[1;33mWARNING!!!: Not enough memory available for Docker.\e[0m"
+          echo "At least 4GB of memory required. You have $$(numfmt --to iec $$((mem_available * one_meg)))"
+          echo
+          warning_resources="true"
+        fi
+        if (( cpus_available < 2 )); then
+          echo
+          echo -e "\033[1;33mWARNING!!!: Not enough CPUS available for Docker.\e[0m"
+          echo "At least 2 CPUs recommended. You have $${cpus_available}"
+          echo
+          warning_resources="true"
+        fi
+        if (( disk_available < one_meg * 10 )); then
+          echo
+          echo -e "\033[1;33mWARNING!!!: Not enough Disk space available for Docker.\e[0m"
+          echo "At least 10 GBs recommended. You have $$(numfmt --to iec $$((disk_available * 1024 )))"
+          echo
+          warning_resources="true"
+        fi
+        if [[ $${warning_resources} == "true" ]]; then
+          echo
+          echo -e "\033[1;33mWARNING!!!: You have not enough resources to run Airflow (see above)!\e[0m"
+          echo "Please follow the instructions to increase amount of resources available:"
+          echo "   https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/index.html#before-you-begin"
+          echo
+        fi
+        mkdir -p /sources/logs /sources/dags /sources/plugins
+        chown -R "${AIRFLOW_UID}:0" /sources/{logs,dags,plugins}
+        exec /entrypoint airflow version
+    # yamllint enable rule:line-length
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
+      _PIP_ADDITIONAL_REQUIREMENTS: ''
+    user: "0:0"
+    volumes:
+      - ${AIRFLOW_PROJ_DIR:-.}:/sources
+
+  airflow-cli:
+    <<: *airflow-common
+    profiles:
+      - debug
+    environment:
+      <<: *airflow-common-env
+      CONNECTION_CHECK_MAX_COUNT: "0"
+    # Workaround for entrypoint issue. See: https://github.com/apache/airflow/issues/16252
+    command:
+      - bash
+      - -c
+      - airflow
+
+  cloudbeaver:
+    image: dbeaver/cloudbeaver:latest
+    container_name: cloudbeaver
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8978:8978"   # Web UI CloudBeaver
+    volumes:
+      - ./cloudbeaver_data:/opt/cloudbeaver/workspace
+    restart: unless-stopped
+  
+  kafka:
+    container_name: kafka
+    image: apache/kafka:latest
+    ports:
+      - "9092:9092"  # Internal listener (Docker network)
+      - "9094:9094"  # External listener (host machine)
+
+    environment:
+      ############################################
+      # KRaft Metadata & Node Identity
+      ############################################
+      # Unique ID for this Kafka node
+      KAFKA_NODE_ID: 1
+      # Unique Kafka cluster identifier (required for KRaft mode)
+      KAFKA_CLUSTER_ID: 'energy-tracker-cluster-1'
+      # Node roles — this instance will act as BOTH a broker and controller
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+
+      ############################################
+      # Controller Quorum Configuration (Raft)
+      ############################################
+      # List of controller nodes that form the Raft quorum
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:9093'
+      # Listener name used by controllers for internal Raft communication
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+
+      ############################################
+      # Network Listeners (Internal, External & Controller)
+      ############################################
+      # Define all listener endpoints for this Kafka node
+      KAFKA_LISTENERS: >
+        PLAINTEXT://0.0.0.0:9092,
+        EXTERNAL://0.0.0.0:9094,
+        CONTROLLER://0.0.0.0:9093
+
+      # What each listener advertises to connecting clients
+      # Internal (Docker containers): kafka:9092
+      # External (host machine): localhost:9094
+      KAFKA_ADVERTISED_LISTENERS: >
+        PLAINTEXT://kafka:9092,
+        EXTERNAL://localhost:9094
+
+      # Maps listener names to their security protocols
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: >
+        CONTROLLER:PLAINTEXT,
+        PLAINTEXT:PLAINTEXT,
+        EXTERNAL:PLAINTEXT
+
+      # Which listener brokers should use for internal communication
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+
+      ############################################
+      #  Single-Node Cluster Safety Settings
+      #    (because replication >1 would break)
+      ############################################
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+
+      ############################################
+      #  Broker Defaults & Quality-of-Life Settings
+      ############################################
+      # Speed up consumer group startup
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Auto-create topics if they don't already exist
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      # Default number of partitions per topic
+      KAFKA_NUM_PARTITIONS: 1
+    volumes:
+      - ./start-with-topics.sh:/start-with-topics.sh
+      - ./kafka-data:/var/lib/kafka/data
+    entrypoint: [ "/bin/sh", "/start-with-topics.sh" ]
+  
+  spark-master:
+    image: phongtd11-spark-image
+    entrypoint: ['./entrypoint.sh', 'master']
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8080" ]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    volumes:
+      - ./spark_scripts:/opt/spark_scripts
+      - ./reddit_posts.jsonl:/mnt/user-data/uploads/reddit_posts.jsonl
+      - ./spark-jars:/opt/spark-jars
+      - spark_data:/tmp
+      - spark-logs:/opt/spark/spark-events
+    env_file:
+      - .env.spark
+    ports:
+      - '9090:8080'
+      - '7077:7077'
+
+  spark-history-server:
+    image: phongtd11-spark-image
+    entrypoint: ['./entrypoint.sh', 'history']
+    depends_on:
+      - spark-master
+    env_file:
+      - .env.spark
+    volumes:
+      - ./spark_scripts:/opt/spark_scripts
+      - ./reddit_posts.jsonl:/mnt/user-data/uploads/reddit_posts.jsonl
+      - ./spark-jars:/opt/spark-jars
+      - spark_data:/tmp
+      - spark-logs:/opt/spark/spark-events
+    ports:
+      - '18080:18080'
+
+  spark-worker:
+    image: phongtd11-spark-image
+    entrypoint: ['./entrypoint.sh', 'worker']
+    depends_on:
+      - spark-master
+    env_file:
+      - .env.spark
+    volumes:
+      - ./spark_scripts:/opt/spark_scripts
+      - ./reddit_posts.jsonl:/mnt/user-data/uploads/reddit_posts.jsonl
+      - ./spark-jars:/opt/spark-jars
+      - spark_data:/tmp
+      - spark-logs:/opt/spark/spark-events
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081"] 
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+  # ==========================================================================
+  # GRAFANA - Monitoring Dashboard
+  # ==========================================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: reddit-grafana
+    ports:
+      - "3333:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+
+# ============================================================================
+# VOLUMES
+# ============================================================================
+volumes:
+  postgres_data:
+    driver: local
+  airflow_postgres_data:
+    driver: local
+  spark_data:
+    driver: local
+  grafana_data:
+    driver: local
+  spark-logs:

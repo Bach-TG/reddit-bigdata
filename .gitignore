@@ -1,0 +1,5 @@
+**/cloudbeaver_data/
+**/kafka_data/
+**/logs/
+**/plugins/
+**/data_spark/
