@@ -1,0 +1,91 @@
+# Docker Compose for Reddit Analytics Visualization
+# Services: PostgreSQL + Streamlit Dashboard
+
+version: "3.8"
+
+services:
+  # ============================================================
+  # PostgreSQL Database
+  # ============================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: reddit_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: reddit_db
+      POSTGRES_USER: reddit_user
+      POSTGRES_PASSWORD: reddit_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Initialize tables on first run
+      - ./phongtd11/postgres_scripts/init_postgres.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reddit_user -d reddit_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - reddit_network
+
+  # ============================================================
+  # Streamlit Dashboard
+  # ============================================================
+  dashboard:
+    build:
+      context: ./visualize
+      dockerfile: Dockerfile
+    container_name: reddit_dashboard
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: reddit_db
+      POSTGRES_USER: reddit_user
+      POSTGRES_PASSWORD: reddit_pass
+    ports:
+      - "8501:8501"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - reddit_network
+
+  # ============================================================
+  # Data Import Service (one-time run)
+  # ============================================================
+  data-import:
+    image: python:3.11-slim
+    container_name: reddit_data_import
+    working_dir: /app
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: reddit_db
+      POSTGRES_USER: reddit_user
+      POSTGRES_PASSWORD: reddit_pass
+    volumes:
+      - ./scripts:/app/scripts:ro
+      - ./data:/app/data:ro
+    command: >
+      bash -c "
+        pip install psycopg2-binary &&
+        python /app/scripts/create_tables.py &&
+        python /app/scripts/import_data.py
+      "
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - reddit_network
+    profiles:
+      - import # Only run when explicitly requested
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  reddit_network:
+    driver: bridge
